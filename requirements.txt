@@ -1,0 +1,15 @@
+# Core AI and ML
+google-cloud-aiplatform>=1.38.0
+numpy>=1.24.0
+asyncio>=3.4.3
+
+# Search and Database
+elasticsearch>=8.11.0
+
+# Testing and Development
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+
+# Utilities
+python-dotenv>=1.0.0
+requests>=2.31.0

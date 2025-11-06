@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  # Elasticsearch - Search & Memory Layer
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: intelligence-mesh-search
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    networks:
+      - intelligence-mesh
+
+  # Backend API - Intelligence Mesh Core
+  backend:
+    build: ./core
+    container_name: intelligence-mesh-api
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+    ports:
+      - "8000:8000"
+    depends_on:
+      - elasticsearch
+    networks:
+      - intelligence-mesh
+    volumes:
+      - ./core:/app
+      - ./agents:/app/agents
+
+  # Frontend Dashboard (Optional - Next.js)
+  # Uncomment if you have dashboard built
+  # dashboard:
+  #   build: ./dashboard
+  #   container_name: intelligence-mesh-ui
+  #   environment:
+  #     - NEXT_PUBLIC_API_URL=http://localhost:8000
+  #   ports:
+  #     - "3000:3000"
+  #   depends_on:
+  #     - backend
+  #   networks:
+  #     - intelligence-mesh
+
+volumes:
+  esdata:
+    driver: local
+
+networks:
+  intelligence-mesh:
+    driver: bridge
