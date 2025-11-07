@@ -1,0 +1,308 @@
+{
+  "Comment": "SecurityMesh AI - Multi-Agent Threat Analysis Workflow",
+  "StartAt": "IngestThreat",
+  "States": {
+    "IngestThreat": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "${ThreatIntelligenceTable}",
+        "Item": {
+          "cve_id": {
+            "S.$": "$.cve_id"
+          },
+          "ingestion_time": {
+            "N.$": "$$.State.EnteredTime"
+          },
+          "raw_data": {
+            "S.$": "States.JsonToString($.data)"
+          },
+          "status": {
+            "S": "INGESTED"
+          }
+        }
+      },
+      "Next": "ParallelAnalysis",
+      "ResultPath": "$.ingestion_result"
+    },
+
+    "ParallelAnalysis": {
+      "Type": "Parallel",
+      "Comment": "Analyze threat with multiple agents in parallel",
+      "Branches": [
+        {
+          "StartAt": "GeminiAnalysis",
+          "States": {
+            "GeminiAnalysis": {
+              "Type": "Task",
+              "Resource": "${GeminiAgentArn}",
+              "Parameters": {
+                "agent_type": "gemini",
+                "task_id.$": "$.task_id",
+                "task_type": "threat_analysis",
+                "data.$": "$.data"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "GeminiFailure"
+                }
+              ],
+              "End": true
+            },
+            "GeminiFailure": {
+              "Type": "Pass",
+              "Result": {
+                "agent": "gemini",
+                "status": "failed"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "ThreatAnalysisDeep",
+          "States": {
+            "ThreatAnalysisDeep": {
+              "Type": "Task",
+              "Resource": "${ThreatAnalysisAgentArn}",
+              "Parameters": {
+                "agent_type": "threat_analyzer",
+                "task_id.$": "$.task_id",
+                "task_type": "threat_analysis",
+                "data.$": "$.data"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CVEEnrichment",
+          "States": {
+            "CVEEnrichment": {
+              "Type": "Task",
+              "Resource": "${WriterAgentArn}",
+              "Parameters": {
+                "agent_type": "writer",
+                "task_id.$": "$.task_id",
+                "task_type": "cve_enrichment",
+                "data.$": "$.data"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "Next": "AggregateResults",
+      "ResultPath": "$.parallel_results"
+    },
+
+    "AggregateResults": {
+      "Type": "Pass",
+      "Comment": "Aggregate all parallel analysis results",
+      "Parameters": {
+        "task_id.$": "$.task_id",
+        "cve_id.$": "$.data.cve_id",
+        "gemini_result.$": "$.parallel_results[0]",
+        "threat_analysis.$": "$.parallel_results[1]",
+        "enrichment.$": "$.parallel_results[2]",
+        "timestamp.$": "$$.State.EnteredTime"
+      },
+      "ResultPath": "$.aggregated",
+      "Next": "DetermineSeverity"
+    },
+
+    "DetermineSeverity": {
+      "Type": "Choice",
+      "Comment": "Route based on threat severity",
+      "Choices": [
+        {
+          "Variable": "$.data.severity",
+          "StringEquals": "CRITICAL",
+          "Next": "CriticalThreatPath"
+        },
+        {
+          "Variable": "$.data.severity",
+          "StringEquals": "HIGH",
+          "Next": "HighThreatPath"
+        }
+      ],
+      "Default": "StandardReporting"
+    },
+
+    "CriticalThreatPath": {
+      "Type": "Parallel",
+      "Comment": "Immediate actions for critical threats",
+      "Branches": [
+        {
+          "StartAt": "GenerateExecutiveSummary",
+          "States": {
+            "GenerateExecutiveSummary": {
+              "Type": "Task",
+              "Resource": "${SummarizerAgentArn}",
+              "Parameters": {
+                "agent_type": "summarizer",
+                "task_id.$": "$.task_id",
+                "task_type": "report_generation",
+                "data": {
+                  "type": "executive",
+                  "threats.$": "$.aggregated",
+                  "report_id.$": "$.task_id"
+                }
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "GenerateTechnicalReport",
+          "States": {
+            "GenerateTechnicalReport": {
+              "Type": "Task",
+              "Resource": "${WriterAgentArn}",
+              "Parameters": {
+                "agent_type": "writer",
+                "task_id.$": "$.task_id",
+                "task_type": "report_generation",
+                "data": {
+                  "type": "technical",
+                  "threats.$": "$.aggregated",
+                  "report_id.$": "$.task_id"
+                }
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "SendAlerts",
+          "States": {
+            "SendAlerts": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${AlertTopicArn}",
+                "Subject": "CRITICAL THREAT DETECTED",
+                "Message.$": "States.Format('Critical threat detected: {}\\n\\nCVE: {}\\n\\nSeverity: {}\\n\\nAnalysis: {}', $.data.description, $.data.cve_id, $.data.severity, $.aggregated)"
+              },
+              "End": true
+            }
+          }
+        }
+      ],
+      "Next": "UpdateThreatDatabase"
+    },
+
+    "HighThreatPath": {
+      "Type": "Task",
+      "Comment": "Generate detailed report for high severity threats",
+      "Resource": "${WriterAgentArn}",
+      "Parameters": {
+        "agent_type": "writer",
+        "task_id.$": "$.task_id",
+        "task_type": "report_generation",
+        "data": {
+          "type": "detailed",
+          "threats.$": "$.aggregated",
+          "report_id.$": "$.task_id"
+        }
+      },
+      "Next": "UpdateThreatDatabase"
+    },
+
+    "StandardReporting": {
+      "Type": "Task",
+      "Comment": "Standard reporting for medium/low threats",
+      "Resource": "${SummarizerAgentArn}",
+      "Parameters": {
+        "agent_type": "summarizer",
+        "task_id.$": "$.task_id",
+        "task_type": "report_generation",
+        "data": {
+          "type": "summary",
+          "threats.$": "$.aggregated",
+          "report_id.$": "$.task_id"
+        }
+      },
+      "Next": "UpdateThreatDatabase"
+    },
+
+    "UpdateThreatDatabase": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${ThreatIntelligenceTable}",
+        "Key": {
+          "cve_id": {
+            "S.$": "$.data.cve_id"
+          },
+          "ingestion_time": {
+            "N.$": "$.ingestion_result.Item.ingestion_time.N"
+          }
+        },
+        "UpdateExpression": "SET #status = :analyzed, analysis_results = :results, completion_time = :time",
+        "ExpressionAttributeNames": {
+          "#status": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":analyzed": {
+            "S": "ANALYZED"
+          },
+          ":results": {
+            "S.$": "States.JsonToString($.aggregated)"
+          },
+          ":time": {
+            "N.$": "$$.State.EnteredTime"
+          }
+        }
+      },
+      "Next": "PublishCompletionEvent"
+    },
+
+    "PublishCompletionEvent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Parameters": {
+        "Entries": [
+          {
+            "Source": "securitymesh.workflow",
+            "DetailType": "ThreatAnalysisComplete",
+            "Detail.$": "States.JsonToString($)",
+            "EventBusName": "${AgentEventBus}"
+          }
+        ]
+      },
+      "Next": "Success"
+    },
+
+    "Success": {
+      "Type": "Succeed",
+      "Comment": "Threat analysis workflow completed successfully"
+    }
+  }
+}

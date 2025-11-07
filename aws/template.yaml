@@ -1,0 +1,544 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SecurityMesh AI - Autonomous Multi-Agent Threat Intelligence Platform
+  AWS Global Vibe AI Coding Hackathon 2025
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 1024
+    Runtime: python3.11
+    Environment:
+      Variables:
+        MEMORY_TABLE: !Ref AgentMemoryTable
+        EVENT_BUS: !Ref AgentEventBus
+        THREAT_BUCKET: !Ref ThreatIntelligenceBucket
+
+Parameters:
+  BedrockModelId:
+    Type: String
+    Default: anthropic.claude-3-5-sonnet-20241022-v2:0
+    Description: Bedrock foundation model ID
+
+  DeploymentStage:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment
+
+Resources:
+  # ========================================
+  # DynamoDB Tables
+  # ========================================
+
+  AgentMemoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'securitymesh-agent-memory-${DeploymentStage}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: agent_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: agent_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Project
+          Value: SecurityMesh-AI
+        - Key: Environment
+          Value: !Ref DeploymentStage
+
+  ThreatIntelligenceTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'securitymesh-threat-intelligence-${DeploymentStage}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: cve_id
+          AttributeType: S
+        - AttributeName: ingestion_time
+          AttributeType: N
+      KeySchema:
+        - AttributeName: cve_id
+          KeyType: HASH
+        - AttributeName: ingestion_time
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: severity-index
+          KeySchema:
+            - AttributeName: cve_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: SecurityMesh-AI
+
+  TaskQueueTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'securitymesh-task-queue-${DeploymentStage}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: task_id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: task_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: status-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: SecurityMesh-AI
+
+  # ========================================
+  # S3 Buckets
+  # ========================================
+
+  ThreatIntelligenceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'securitymesh-threat-data-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+      Tags:
+        - Key: Project
+          Value: SecurityMesh-AI
+
+  AgentLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'securitymesh-agent-logs-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireLogs
+            Status: Enabled
+            ExpirationInDays: 30
+      Tags:
+        - Key: Project
+          Value: SecurityMesh-AI
+
+  # ========================================
+  # EventBridge Event Bus
+  # ========================================
+
+  AgentEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub 'securitymesh-agent-communication-${DeploymentStage}'
+
+  # ========================================
+  # Lambda Functions (9 Security Agents)
+  # ========================================
+
+  GeminiAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'securitymesh-gemini-agent-${DeploymentStage}'
+      CodeUri: ../
+      Handler: aws.lambda_agent.lambda_handler
+      Environment:
+        Variables:
+          AGENT_TYPE: gemini
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentMemoryTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ThreatIntelligenceTable
+        - S3CrudPolicy:
+            BucketName: !Ref ThreatIntelligenceBucket
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref AgentEventBus
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: '*'
+      ReservedConcurrentExecutions: 10
+      Tags:
+        Project: SecurityMesh-AI
+        Agent: Gemini
+
+  WriterAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'securitymesh-writer-agent-${DeploymentStage}'
+      CodeUri: ../
+      Handler: aws.lambda_agent.lambda_handler
+      Environment:
+        Variables:
+          AGENT_TYPE: writer
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentMemoryTable
+        - S3CrudPolicy:
+            BucketName: !Ref ThreatIntelligenceBucket
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref AgentEventBus
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: '*'
+      ReservedConcurrentExecutions: 10
+      Tags:
+        Project: SecurityMesh-AI
+        Agent: Writer
+
+  RewriterAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'securitymesh-rewriter-agent-${DeploymentStage}'
+      CodeUri: ../
+      Handler: aws.lambda_agent.lambda_handler
+      Environment:
+        Variables:
+          AGENT_TYPE: rewriter
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentMemoryTable
+        - S3CrudPolicy:
+            BucketName: !Ref ThreatIntelligenceBucket
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref AgentEventBus
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: '*'
+      ReservedConcurrentExecutions: 10
+      Tags:
+        Project: SecurityMesh-AI
+        Agent: Rewriter
+
+  TranslatorAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'securitymesh-translator-agent-${DeploymentStage}'
+      CodeUri: ../
+      Handler: aws.lambda_agent.lambda_handler
+      Environment:
+        Variables:
+          AGENT_TYPE: translator
+          BEDROCK_MODEL_ID: amazon.titan-text-express-v1
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentMemoryTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref AgentEventBus
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: '*'
+      ReservedConcurrentExecutions: 5
+      Tags:
+        Project: SecurityMesh-AI
+        Agent: Translator
+
+  SummarizerAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'securitymesh-summarizer-agent-${DeploymentStage}'
+      CodeUri: ../
+      Handler: aws.lambda_agent.lambda_handler
+      Environment:
+        Variables:
+          AGENT_TYPE: summarizer
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentMemoryTable
+        - S3CrudPolicy:
+            BucketName: !Ref ThreatIntelligenceBucket
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref AgentEventBus
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: '*'
+      ReservedConcurrentExecutions: 10
+      Tags:
+        Project: SecurityMesh-AI
+        Agent: Summarizer
+
+  ProofreaderAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'securitymesh-proofreader-agent-${DeploymentStage}'
+      CodeUri: ../
+      Handler: aws.lambda_agent.lambda_handler
+      Environment:
+        Variables:
+          AGENT_TYPE: proofreader
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentMemoryTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref AgentEventBus
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: '*'
+      ReservedConcurrentExecutions: 5
+      Tags:
+        Project: SecurityMesh-AI
+        Agent: Proofreader
+
+  LanguageDetectorAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'securitymesh-langdetect-agent-${DeploymentStage}'
+      CodeUri: ../
+      Handler: aws.lambda_agent.lambda_handler
+      Environment:
+        Variables:
+          AGENT_TYPE: language_detector
+          BEDROCK_MODEL_ID: amazon.titan-text-express-v1
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentMemoryTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref AgentEventBus
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: '*'
+      ReservedConcurrentExecutions: 5
+      Tags:
+        Project: SecurityMesh-AI
+        Agent: LanguageDetector
+
+  PromptGeneratorAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'securitymesh-promptgen-agent-${DeploymentStage}'
+      CodeUri: ../
+      Handler: aws.lambda_agent.lambda_handler
+      Environment:
+        Variables:
+          AGENT_TYPE: prompt_generator
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentMemoryTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref AgentEventBus
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: '*'
+      ReservedConcurrentExecutions: 5
+      Tags:
+        Project: SecurityMesh-AI
+        Agent: PromptGenerator
+
+  ThreatAnalysisAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'securitymesh-threatanalysis-agent-${DeploymentStage}'
+      CodeUri: ../
+      Handler: aws.lambda_agent.lambda_handler
+      Environment:
+        Variables:
+          AGENT_TYPE: threat_analyzer
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentMemoryTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ThreatIntelligenceTable
+        - S3CrudPolicy:
+            BucketName: !Ref ThreatIntelligenceBucket
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref AgentEventBus
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: '*'
+      ReservedConcurrentExecutions: 20
+      Tags:
+        Project: SecurityMesh-AI
+        Agent: ThreatAnalyzer
+
+  # ========================================
+  # Step Functions Workflow
+  # ========================================
+
+  ThreatAnalysisStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub 'securitymesh-threat-workflow-${DeploymentStage}'
+      DefinitionUri: step_functions_workflow.json
+      DefinitionSubstitutions:
+        GeminiAgentArn: !GetAtt GeminiAgentFunction.Arn
+        WriterAgentArn: !GetAtt WriterAgentFunction.Arn
+        RewriterAgentArn: !GetAtt RewriterAgentFunction.Arn
+        ThreatAnalysisAgentArn: !GetAtt ThreatAnalysisAgentFunction.Arn
+        SummarizerAgentArn: !GetAtt SummarizerAgentFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref GeminiAgentFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref WriterAgentFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref RewriterAgentFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ThreatAnalysisAgentFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SummarizerAgentFunction
+
+  # ========================================
+  # API Gateway
+  # ========================================
+
+  ThreatIntelligenceApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'securitymesh-api-${DeploymentStage}'
+      StageName: !Ref DeploymentStage
+      Auth:
+        ApiKeyRequired: true
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE'"
+        AllowHeaders: "'Content-Type,X-Api-Key'"
+        AllowOrigin: "'*'"
+
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: !Sub 'securitymesh-apikey-${DeploymentStage}'
+      Enabled: true
+
+  UsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: ThreatIntelligenceApi
+    Properties:
+      UsagePlanName: !Sub 'securitymesh-usage-${DeploymentStage}'
+      Throttle:
+        RateLimit: 100
+        BurstLimit: 200
+      Quota:
+        Limit: 10000
+        Period: MONTH
+
+  # ========================================
+  # CloudWatch Alarms
+  # ========================================
+
+  HighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'securitymesh-high-errors-${DeploymentStage}'
+      AlarmDescription: High error rate in Lambda functions
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+
+  HighCostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'securitymesh-high-cost-${DeploymentStage}'
+      AlarmDescription: High Bedrock API costs
+      MetricName: InvokedModelRequestCount
+      Namespace: AWS/Bedrock
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1000
+      ComparisonOperator: GreaterThanThreshold
+
+# ========================================
+# Outputs
+# ========================================
+
+Outputs:
+  AgentMemoryTableName:
+    Description: Agent Memory DynamoDB Table
+    Value: !Ref AgentMemoryTable
+    Export:
+      Name: !Sub '${AWS::StackName}-AgentMemoryTable'
+
+  ThreatIntelligenceBucketName:
+    Description: Threat Intelligence S3 Bucket
+    Value: !Ref ThreatIntelligenceBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ThreatBucket'
+
+  EventBusName:
+    Description: Agent Communication Event Bus
+    Value: !Ref AgentEventBus
+    Export:
+      Name: !Sub '${AWS::StackName}-EventBus'
+
+  ApiEndpoint:
+    Description: API Gateway Endpoint
+    Value: !Sub 'https://${ThreatIntelligenceApi}.execute-api.${AWS::Region}.amazonaws.com/${DeploymentStage}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
+
+  StateMachineArn:
+    Description: Threat Analysis Step Functions ARN
+    Value: !Ref ThreatAnalysisStateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachine'
+
+  GeminiAgentArn:
+    Description: Gemini Agent Lambda ARN
+    Value: !GetAtt GeminiAgentFunction.Arn
+
+  ThreatAnalysisAgentArn:
+    Description: Threat Analysis Agent Lambda ARN
+    Value: !GetAtt ThreatAnalysisAgentFunction.Arn
