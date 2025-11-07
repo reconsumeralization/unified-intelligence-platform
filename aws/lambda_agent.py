@@ -7,6 +7,16 @@ This Lambda function handles:
 - DynamoDB memory access
 - EventBridge communication
 - Step Functions orchestration
+
+Amazon Kiro IDE contributions:
+- Lambda function structure and async patterns
+- DynamoDB integration optimization
+- EventBridge event publishing patterns
+- Cost optimization recommendations (reserved concurrency)
+- Memory management and caching strategies
+- Error handling and circuit breaker implementation
+
+Built for AWS Global Vibe AI Coding Hackathon 2025
 """
 
 import json

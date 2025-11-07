@@ -9,6 +9,16 @@ Supported Models:
 - Claude 3.5 Sonnet (Anthropic)
 - Titan Text/Embeddings (Amazon)
 - Jurassic-2 (AI21 Labs)
+
+Development assisted by Amazon Kiro IDE:
+- Architecture design and AWS service selection
+- Code optimization and best practices review
+- Error handling and retry logic implementation
+- Performance tuning recommendations
+- Connection pooling strategies for cost optimization
+- Security best practices and IAM policy design
+
+Built for AWS Global Vibe AI Coding Hackathon 2025
 """
 
 import json
